@@ -14,22 +14,19 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.runtime.Composable
+import androidx.compose.foundation.layout.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
+import androidx.wear.compose.material.Button
 import androidx.wear.compose.material.MaterialTheme
 import androidx.wear.compose.material.Text
 import androidx.wear.compose.material.TimeText
-import androidx.wear.tooling.preview.devices.WearDevices
-import com.example.extra.R
 import com.example.extra.presentation.theme.ExtraTheme
+import com.google.android.gms.tasks.Tasks
 import com.google.android.gms.wearable.CapabilityClient
 import com.google.android.gms.wearable.CapabilityInfo
 import com.google.android.gms.wearable.DataClient
@@ -37,8 +34,13 @@ import com.google.android.gms.wearable.DataEventBuffer
 import com.google.android.gms.wearable.MessageClient
 import com.google.android.gms.wearable.MessageEvent
 import com.google.android.gms.wearable.Wearable
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity(),
+    CoroutineScope by MainScope(),
     SensorEventListener,
     DataClient.OnDataChangedListener,
     MessageClient.OnMessageReceivedListener,
@@ -50,20 +52,40 @@ class MainActivity : ComponentActivity(),
     private var sensor: Sensor?=null
     private var sensorType=Sensor.TYPE_GYROSCOPE
 
+    private var sensorReading = mutableStateOf("0.0")
+    private var isSensorActive = mutableStateOf(false)
 
-    lateinit var nodeID: String
-    private lateinit var PAYLOAD: String
+    private var nodeID: String = ""
+    private val PAYLOAD = "/sensor_data"
 
 
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
 
         super.onCreate(savedInstanceState)
+        activityContext = this
 
         setTheme(android.R.style.Theme_DeviceDefault)
 
+        // Inicializar sensor
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        sensor = sensorManager.getDefaultSensor(sensorType)
+
+        // Registrar listeners inmediatamente
+        try {
+            Wearable.getDataClient(activityContext!!).addListener(this)
+            Wearable.getMessageClient(activityContext!!).addListener(this)
+            Wearable.getCapabilityClient(activityContext!!)
+                .addListener(this, Uri.parse("wear://"), CapabilityClient.FILTER_REACHABLE)
+        } catch (e: Exception) {
+            Log.d("onCreate", e.toString())
+        }
+
+        // Obtener nodos conectados
+        getNodes()
+
         setContent {
-            WearApp("Android")
+            WearApp()
         }
     }
 
@@ -123,38 +145,106 @@ class MainActivity : ComponentActivity(),
     override fun onSensorChanged(SE: SensorEvent?) {
         if (SE?.sensor?.type==sensorType){
             val lectura=SE.values[0]
+            sensorReading.value = String.format("%.2f", lectura)
             Log.d("onSensorChanged", "lectura ${lectura}")
         }
     }
 
-    @Composable
-    fun WearApp(greetingName: String) {
-        ExtraTheme {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colors.background),
-                contentAlignment = Alignment.Center
-            ) {
-                TimeText()
-                Greeting(greetingName = greetingName)
+    private fun getNodes(){
+        launch(Dispatchers.Default){
+            val nodeList= Wearable.getNodeClient(activityContext!!).connectedNodes
+            try {
+                val nodes= Tasks.await(nodeList)
+                for(node in nodes){
+                    Log.d("NODO", node.toString())
+                    Log.d("NODO", "El id del nodo es: ${node.id}")
+                    nodeID = node.id
+                }
+            }catch (exception: Exception){
+                Log.d("Error al obtener nodos", exception.toString())
             }
         }
     }
 
-    @Composable
-    fun Greeting(greetingName: String) {
-        Text(
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = TextAlign.Center,
-            color = MaterialTheme.colors.primary,
-            text = stringResource(R.string.hello_world, greetingName)
-        )
+    private fun sendSensorData(){
+        if(nodeID.isEmpty()){
+            Log.d("sendSensorData", "No hay nodos conectados")
+            return
+        }
+        
+        Wearable.getMessageClient(activityContext!!)
+            .sendMessage(nodeID, PAYLOAD, sensorReading.value.toByteArray())
+            .addOnSuccessListener {
+                Log.d("sendSensorData", "Mensaje enviado: ${sensorReading.value}")
+            }
+            .addOnFailureListener { exception ->
+                Log.d("sendSensorData", "Error: ${exception.message}")
+            }
     }
 
-    @Preview(device = WearDevices.SMALL_ROUND, showSystemUi = true)
     @Composable
-    fun DefaultPreview() {
-        WearApp("Preview Android")
+    fun WearApp() {
+        ExtraTheme {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colors.background)
+                    .padding(16.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                TimeText()
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = "Sensor Giroscopio",
+                        style = MaterialTheme.typography.title3,
+                        color = MaterialTheme.colors.primary,
+                        textAlign = TextAlign.Center
+                    )
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    Text(
+                        text = sensorReading.value,
+                        style = MaterialTheme.typography.display1,
+                        color = MaterialTheme.colors.secondary,
+                        textAlign = TextAlign.Center
+                    )
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    Button(
+                        onClick = {
+                            if(isSensorActive.value){
+                                sensorManager.unregisterListener(this@MainActivity)
+                                isSensorActive.value = false
+                            } else {
+                                startSensor()
+                                isSensorActive.value = true
+                            }
+                        }
+                    ) {
+                        Text(
+                            text = if(isSensorActive.value) "Detener" else "Iniciar",
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    Button(
+                        onClick = { sendSensorData() }
+                    ) {
+                        Text(
+                            text = "Enviar",
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+        }
     }
 }
